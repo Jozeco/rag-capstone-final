@@ -1,0 +1,7 @@
+.venv/
+.env
+.DS_Store
+Wikipedia/
+__pycache__/
+*.pkl
+*.log

@@ -1,0 +1,50 @@
+# Wikipedia RAG Capstone
+
+A small, local-corpus RAG example with a bounded retrieval agent. The system searches
+Wikipedia HTML files with BM25, can inspect an article or follow links to relevant
+articles, and asks a chat model to answer from the collected passages with citations.
+
+## Design
+
+The app keeps the important steps visible:
+
+1. **Retrieve:** BM25 finds likely articles in the local `Wikipedia/` collection.
+2. **Expand only when needed:** The controller can inspect an article or follow its
+   links when the initial passages do not answer the question.
+3. **Bound the work:** Retrieval stops at four steps, and repeated actions are stopped.
+4. **Ground the answer:** The answer model receives the question and retrieved passages,
+   and is instructed to cite article filenames and state when evidence is insufficient.
+5. **Keep source data local:** HTML parsing, indexing, and link traversal happen locally.
+   The question, retrieval history, article names, and selected passages are sent to the
+   configured model provider.
+
+This intentionally leaves out evaluation harnesses, alternate pipelines, token-cost
+dashboards, persistent pickle caches, and extra safety heuristics so the core RAG flow
+stays easy to follow.
+
+## Run
+
+Use Python 3.11 or newer:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Add the provided OpenRouter key to a `.env` file in the project root:
+
+```dotenv
+OPENROUTER_API_KEY=your-key
+# Optional; defaults to openai/gpt-4o-mini
+OPENROUTER_MODEL=openai/gpt-4o-mini
+```
+
+Ensure the local Wikipedia HTML collection is in `Wikipedia/`, then start the app:
+
+```bash
+python main.py
+```
+
+Ask questions in the terminal and enter `quit` to exit. The first startup builds the
+BM25 index and link graph in memory; no cache files are created.
