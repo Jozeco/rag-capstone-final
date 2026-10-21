@@ -15,7 +15,7 @@ The app keeps the important steps visible:
 4. **Ground the answer:** The answer model receives the question and retrieved passages,
    and is instructed to cite article filenames and state when evidence is insufficient.
 5. **Remember the conversation:** The six most recent successful exchanges help resolve
-   follow-up questions, while retrieved articles remain the only factual evidence.
+   follow-up questions. Grounded prior answers can answer a new turn without another search.
 6. **Keep source data local:** HTML parsing, indexing, and link traversal happen locally.
    The question, retrieval history, article names, and selected passages are sent to the
    configured model provider.
