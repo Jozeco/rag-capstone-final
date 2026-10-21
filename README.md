@@ -14,7 +14,9 @@ The app keeps the important steps visible:
 3. **Bound the work:** Retrieval stops at four steps, and repeated actions are stopped.
 4. **Ground the answer:** The answer model receives the question and retrieved passages,
    and is instructed to cite article filenames and state when evidence is insufficient.
-5. **Keep source data local:** HTML parsing, indexing, and link traversal happen locally.
+5. **Remember the conversation:** The six most recent successful exchanges help resolve
+   follow-up questions, while retrieved articles remain the only factual evidence.
+6. **Keep source data local:** HTML parsing, indexing, and link traversal happen locally.
    The question, retrieval history, article names, and selected passages are sent to the
    configured model provider.
 
@@ -46,5 +48,5 @@ Ensure the local Wikipedia HTML collection is in `Wikipedia/`, then start the ap
 python main.py
 ```
 
-Ask questions in the terminal and enter `quit` to exit. The first startup builds the
-BM25 index and link graph in memory; no cache files are created.
+Ask questions in the terminal and enter `quit` to exit. The first startup builds and
+caches the BM25 index and link graph; later runs reuse valid caches.
