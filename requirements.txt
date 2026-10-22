@@ -1,4 +1,5 @@
 beautifulsoup4
+langchain-chroma
 langchain-core
 langchain-openai
 python-dotenv

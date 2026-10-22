@@ -5,3 +5,4 @@ Wikipedia/
 __pycache__/
 *.pkl
 *.log
+chroma_db/
