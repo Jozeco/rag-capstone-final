@@ -10,14 +10,16 @@ The app keeps the important steps visible:
 
 1. **Retrieve:** BM25 and vector search each produce candidates from the local
    `Wikipedia/` collection. Min-max normalized scores are fused with equal weights.
-2. **Expand only when needed:** The controller can inspect an article or follow its
+2. **Clarify ambiguity:** The controller can ask one concise follow-up question when the
+   answer would materially change what it should retrieve.
+3. **Expand only when needed:** The controller can inspect an article or follow its
    links when the initial passages do not answer the question.
-3. **Bound the work:** Retrieval stops at five steps, and repeated actions are stopped.
-4. **Ground the answer:** The answer model receives the question and retrieved passages,
+4. **Bound the work:** Retrieval stops at five steps, and repeated actions are stopped.
+5. **Ground the answer:** The answer model receives the question and retrieved passages,
    and is instructed to cite article filenames and state when evidence is insufficient.
-5. **Remember the conversation:** The six most recent successful exchanges help resolve
+6. **Remember the conversation:** The six most recent successful exchanges help resolve
    follow-up questions. Grounded prior answers can answer a new turn without another search.
-6. **Keep source data local:** HTML parsing, indexing, and link traversal happen locally.
+7. **Keep source data local:** HTML parsing, indexing, and link traversal happen locally.
    The question, retrieval history, article names, and selected passages are sent to the
    configured model provider.
 
@@ -48,6 +50,7 @@ Ensure the local Wikipedia HTML collection is in `Wikipedia/`, then start the ap
 python main.py
 ```
 
-Ask questions in the terminal and enter `quit` to exit. The first startup builds and
-caches the BM25 index, vector index, and link graph; later runs reuse valid caches. Building
-the vector index calls the configured embedding API and can take several minutes.
+Ask questions in the terminal and enter `quit` to exit. The agent may ask one clarification
+before continuing a question. The first startup builds and caches the BM25 index, vector
+index, and link graph; later runs reuse valid caches. Building the vector index calls the
+configured embedding API and can take several minutes.

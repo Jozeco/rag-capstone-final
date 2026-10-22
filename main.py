@@ -8,7 +8,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import unquote
 
 
@@ -40,6 +40,7 @@ AGENT_LINK_K = 5
 STAGNATION_MIN_SHARED_RESULTS = 2
 MAX_QUERY_CHARS = 2000
 MAX_CHAT_HISTORY_TURNS = 6
+MAX_CLARIFICATIONS_PER_QUESTION = 1
 LOG_PATH = Path(__file__).resolve().parent / "capstone-final.log"
 ARTICLE_PATH = Path(__file__).resolve().parent / "Wikipedia"
 BM25_CACHE_PATH = Path(__file__).resolve().parent / "bm25_cache.pkl"
@@ -72,11 +73,11 @@ Available actions:
   and a focused query describing the evidence needed.
 - follow_links: inspect query-relevant articles linked from one known article. Provide
   its exact filename and a focused query.
+- clarify: ask the user one concise question only when unresolved ambiguity would
+  materially change retrieval. Put that question in the clarification field. Do not
+  clarify merely because evidence is missing; search for evidence instead.
 - answer: stop when every material part of the question is supported by current evidence
   or a prior assistant answer, or when the available evidence cannot answer it.
-
-The `clarify` action is intentionally disabled because the agent state machine does not
-pause and resume a question. Do not select it.
 
 If a prior assistant answer fully supports the current question, choose answer immediately
 without searching. Otherwise, prefer search_articles first. Use inspect_article when the
@@ -85,8 +86,9 @@ another entity or article is needed. Reformulate searches to resolve missing fac
 conflicts. If the workflow reports that search is disabled because results have stagnated,
 you MUST choose inspect_article, follow_links, or answer. Never repeat the same action with
 the same inputs. Return ONLY JSON in this form:
-{"action":"search_articles|inspect_article|follow_links|answer", "query":"...",
- "article":"article_filename.html or empty", "reasoning":"brief reason"}
+{"action":"search_articles|inspect_article|follow_links|clarify|answer", "query":"...",
+ "article":"article_filename.html or empty", "clarification":"question for user or empty",
+ "reasoning":"brief reason"}
 """
 
 
@@ -581,6 +583,10 @@ EvidenceStore = dict[str, list[str]]
 ConversationHistory = list[dict[str, str]]
 
 
+class ChatExitRequested(Exception):
+    """Signal that the user exited while answering a clarification."""
+
+
 def _format_conversation_history(history: ConversationHistory | None) -> str:
     if not history:
         return "(no previous turns)"
@@ -826,6 +832,7 @@ def decide_agent_action(
     evidence: EvidenceStore,
     history: list[dict[str, str]],
     search_allowed: bool = True,
+    clarify_allowed: bool = False,
     fallback_article: str = "",
     usage_tracker: TokenUsageTracker | None = None,
     conversation_history: ConversationHistory | None = None,
@@ -837,13 +844,19 @@ def decide_agent_action(
     else:
         search_status = (
             "DISABLED because consecutive searches returned substantially the same "
-            "articles. Choose inspect_article, follow_links, or answer."
+            "articles. Do not choose search_articles again."
         )
+    clarify_status = (
+        "AVAILABLE for one necessary clarification."
+        if clarify_allowed
+        else "DISABLED. Continue with search, inspection, links, or answer."
+    )
     user = (
         "CONVERSATION HISTORY (prior assistant answers may be reused as evidence; "
         "prior user claims may not):\n"
         f"{_format_conversation_history(conversation_history)}\n\n"
         f"CURRENT QUESTION:\n{question}\n\nSEARCH STATUS:\n{search_status}\n\n"
+        f"CLARIFICATION STATUS:\n{clarify_status}\n\n"
         f"ACTION HISTORY:\n{history_text}\n\n"
         f"EVIDENCE:\n{_format_evidence(evidence)}"
     )
@@ -859,15 +872,27 @@ def decide_agent_action(
     except (json.JSONDecodeError, TypeError, ValueError):
         decision = {}
 
-    valid_actions = {"search_articles", "inspect_article", "follow_links", "answer"}
+    valid_actions = {
+        "search_articles",
+        "inspect_article",
+        "follow_links",
+        "clarify",
+        "answer",
+    }
     action = decision.get("action")
     if action not in valid_actions:
         action = "answer" if evidence else "search_articles"
 
     query = str(decision.get("query") or question).strip()
     article = str(decision.get("article") or "").strip()
+    clarification = str(decision.get("clarification") or "").strip()
     reasoning = str(decision.get("reasoning") or "controller parse fallback").strip()
-    if action == "answer" and not evidence and not conversation_history:
+    if action == "clarify" and not clarify_allowed:
+        action = "search_articles" if search_allowed else "answer"
+        reasoning = "Clarification is unavailable or already used; continue autonomously."
+    elif action == "clarify" and not clarification:
+        clarification = "What specific person, place, event, or time period do you mean?"
+    elif action == "answer" and not evidence and not conversation_history:
         action = "search_articles"
         reasoning = "No current evidence or prior answer is available, so search is required."
     elif action in {"inspect_article", "follow_links"} and not article:
@@ -895,6 +920,7 @@ def decide_agent_action(
         "action": action,
         "query": query,
         "article": article,
+        "clarification": clarification,
         "reasoning": reasoning,
     }
 
@@ -907,6 +933,7 @@ def agentic_answer(
     graph: WikipediaLinkGraph,
     usage_tracker: TokenUsageTracker | None = None,
     conversation_history: ConversationHistory | None = None,
+    clarification_callback: Callable[[str], str | None] | None = None,
 ) -> tuple[str, list[dict[str, str]]]:
     """Run the bounded plan–act–observe loop and return its answer and trace."""
     agent_started = time.perf_counter()
@@ -944,6 +971,7 @@ def agentic_answer(
     previous_search_results: list[str] | None = None
     last_search_results: list[str] = []
     search_allowed = True
+    clarifications_used = 0
 
     for step in range(1, AGENT_MAX_STEPS + 1):
         step_started = time.perf_counter()
@@ -953,6 +981,10 @@ def agentic_answer(
             evidence,
             history,
             search_allowed=search_allowed,
+            clarify_allowed=(
+                clarification_callback is not None
+                and clarifications_used < MAX_CLARIFICATIONS_PER_QUESTION
+            ),
             fallback_article=last_search_results[0] if last_search_results else "",
             usage_tracker=usage_tracker,
             conversation_history=conversation_history,
@@ -976,8 +1008,28 @@ def agentic_answer(
 
         search_results: list[str] = []
         stagnation_detected = False
+        clarification_response = ""
         if action == "answer":
             observation = "Evidence judged sufficient; producing the grounded answer."
+        elif action == "clarify":
+            clarifications_used += 1
+            clarification_response = (
+                clarification_callback(decision["clarification"])
+                if clarification_callback is not None
+                else ""
+            ) or ""
+            clarification_safety = check_query_safety(clarification_response)
+            if clarification_safety["allowed"]:
+                clarification_response = str(clarification_safety["question"])
+                question = (
+                    f"{question}\nUser clarification: {clarification_response}"
+                )
+                observation = "The user clarified the question; continue retrieval."
+            else:
+                clarification_response = ""
+                observation = (
+                    "No usable clarification was provided; continue without asking again."
+                )
         elif action == "search_articles":
             observation, search_results = search_articles(
                 retriever,
@@ -1026,6 +1078,8 @@ def agentic_answer(
         if action == "search_articles":
             trace_item["search_results"] = ", ".join(search_results)
             trace_item["stagnation_detected"] = str(stagnation_detected).lower()
+        elif action == "clarify":
+            trace_item["clarification_response"] = clarification_response
         history.append(trace_item)
         print(
             f"  step {step}: {action}"
@@ -1104,20 +1158,32 @@ def safety_log_details(
         None,
     )
     if event is None:
-        return {
+        details = {
             "status": "passed_unchanged",
             "original_question": original_question,
             "question_sent_to_agent": original_question.strip(),
             "reason": "No unsafe extra instructions were detected.",
             "agent_work_skipped": False,
         }
-    return {
-        "status": "blocked" if event["action"] == "safety_block" else "cleaned",
-        "original_question": original_question,
-        "question_sent_to_agent": event.get("query", ""),
-        "reason": event.get("reasoning", ""),
-        "agent_work_skipped": event["action"] == "safety_block",
-    }
+    else:
+        details = {
+            "status": "blocked" if event["action"] == "safety_block" else "cleaned",
+            "original_question": original_question,
+            "question_sent_to_agent": event.get("query", ""),
+            "reason": event.get("reasoning", ""),
+            "agent_work_skipped": event["action"] == "safety_block",
+        }
+
+    clarifications = [
+        item["clarification_response"]
+        for item in trace
+        if item.get("action") == "clarify" and item.get("clarification_response")
+    ]
+    if clarifications and not details["agent_work_skipped"]:
+        details["question_sent_to_agent"] += "\nUser clarification: " + " ".join(
+            clarifications
+        )
+    return details
 
 
 def agent_token_delta(
@@ -1139,6 +1205,19 @@ def agent_token_delta(
             counts["input"] + counts["output"] for counts in by_role.values()
         ),
     }
+
+
+def request_cli_clarification(prompt: str) -> str | None:
+    """Ask a planner-generated follow-up question in the active CLI session."""
+    print(f"\nAssistant: {prompt}")
+    try:
+        response = input("You (clarification): ").strip()
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise ChatExitRequested from exc
+
+    if response.lower() in {"exit", "quit"}:
+        raise ChatExitRequested
+    return response or None
 
 
 def chat_loop(
@@ -1175,7 +1254,11 @@ def chat_loop(
                 graph,
                 usage_tracker=usage_tracker,
                 conversation_history=conversation_history,
+                clarification_callback=request_cli_clarification,
             )
+        except ChatExitRequested:
+            print("Goodbye.")
+            break
         except Exception as exc:
             print(f"\nError: {exc}\n")
             continue
